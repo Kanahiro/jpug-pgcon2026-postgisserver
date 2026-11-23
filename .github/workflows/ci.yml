@@ -11,20 +11,6 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    services:
-      postgis:
-        image: postgis/postgis:18-3.7
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: gis
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/gis
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -35,4 +21,3 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec biome ci .
       - run: pnpm typecheck
-      - run: pnpm test

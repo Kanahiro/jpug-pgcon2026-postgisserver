@@ -3,11 +3,10 @@ import type {
   ExpressionSpecification,
   FillLayerSpecification,
   LineLayerSpecification,
-  LngLatBoundsLike,
 } from 'maplibre-gl';
 import { Map as MapLibreMap, NavigationControl, Popup } from 'maplibre-gl';
 
-type Table = { name: string; srid: number; type: string; columns: string[]; bbox: LngLatBoundsLike | null };
+type Table = { name: string; srid: number; type: string };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const tableSelect = $<HTMLSelectElement>('table');
@@ -91,12 +90,8 @@ map.on('load', async () => {
   }
   if (!tables.length) return status('geometry_columns に public スキーマのテーブルがありません', true);
   tableSelect.replaceChildren(...tables.map((t) => new Option(t.name)));
-  tableSelect.onchange = () => {
-    render();
-    const bbox = tables.find((x) => x.name === tableSelect.value)?.bbox;
-    if (bbox) map.fitBounds(bbox, { padding: 40, maxZoom: 16 });
-  };
-  tableSelect.onchange(new Event('change'));
+  tableSelect.onchange = render;
+  render();
 });
 
 for (const el of document.querySelectorAll<HTMLInputElement>('[name=fmt]')) el.onchange = render;
