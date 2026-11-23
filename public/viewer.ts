@@ -1,3 +1,7 @@
+/**
+ * 動作確認用ビューア（MapLibre GL JS）
+ * サーバーの /tables.json でテーブル一覧を取り、選んだテーブルを MVT または GeoJSON で地図に重ねる。
+ */
 import type {
   CircleLayerSpecification,
   ExpressionSpecification,
@@ -17,8 +21,10 @@ const status = (msg: string, err = false) => {
   statusEl.textContent = msg;
   statusEl.className = err ? 'err' : '';
 };
+// 1つのテーブルに点・線・面が混ざっていても描けるよう、ジオメトリ種別ごとにレイヤを分けて filter で振り分ける
 const is = (...types: string[]): ExpressionSpecification => ['in', ['geometry-type'], ['literal', types]];
 
+// どのレイヤも 'data' ソースを描く。ソースの中身（MVT か GeoJSON か）は render() で差し替える
 const LAYERS = [
   {
     id: 'fill',
@@ -45,6 +51,7 @@ const LAYERS = [
 const layerIds = LAYERS.map((l) => l.id);
 let tables: Table[] = [];
 
+// 背景は OpenStreetMap のラスタタイル
 const map = new MapLibreMap({
   container: 'map',
   center: [139.767, 35.681],
@@ -64,6 +71,7 @@ const map = new MapLibreMap({
 });
 map.addControl(new NavigationControl());
 
+// 選択中のテーブル・形式で 'data' ソースを作り直す
 function render() {
   const t = tableSelect.value;
   for (const id of layerIds) if (map.getLayer(id)) map.removeLayer(id);
@@ -72,12 +80,16 @@ function render() {
   const meta = tables.find((x) => x.name === t);
   if (!meta) return;
   const mvt = fmt() === 'mvt';
+  // MVT: 表示範囲のタイル（/{table}/{z}/{x}/{y}.mvt）だけを都度取得する。大きなデータ向き
+  // GeoJSON: テーブル全体を一度に取得する。小さなデータなら手軽
   map.addSource(
     'data',
     mvt
       ? { type: 'vector', tiles: [`${location.origin}/${t}/{z}/{x}/{y}.mvt`] }
       : { type: 'geojson', data: `${location.origin}/${t}.geojson` },
   );
+  // MVT は 1 タイルに複数レイヤを持てるので、どのレイヤを描くか 'source-layer' で指定する。
+  // サーバー側の ST_AsMVT でレイヤ名をテーブル名にしているので、ここもテーブル名
   for (const l of LAYERS) map.addLayer(mvt ? { ...l, 'source-layer': t } : l);
   status(`${t}: ${meta.type} / EPSG:${meta.srid} / ${mvt ? 'MVT' : 'GeoJSON'}`);
 }
@@ -95,6 +107,7 @@ map.on('load', async () => {
 });
 
 for (const el of document.querySelectorAll<HTMLInputElement>('[name=fmt]')) el.onchange = render;
+// タイル境界を表示すると、MVT がタイル単位で読み込まれている様子が見える
 $<HTMLInputElement>('tiles').onchange = (e) => {
   map.showTileBoundaries = (e.target as HTMLInputElement).checked;
 };
@@ -114,6 +127,7 @@ map.on('error', (e) => {
   if ((e as { sourceId?: string }).sourceId !== 'osm') status(e.error?.message ?? String(e), true);
 });
 
+// クリックした地物の属性（＝ テーブルのジオメトリ以外のカラム）をポップアップ表示
 map.on('click', (e) => {
   const f = map.queryRenderedFeatures(e.point, { layers: layerIds })[0];
   if (!f) return;
