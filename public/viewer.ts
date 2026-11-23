@@ -6,6 +6,7 @@ import type {
   CircleLayerSpecification,
   ExpressionSpecification,
   FillLayerSpecification,
+  GeoJSONSource,
   LineLayerSpecification,
 } from 'maplibre-gl';
 import { Map as MapLibreMap, NavigationControl, Popup } from 'maplibre-gl';
@@ -73,6 +74,7 @@ map.addControl(new NavigationControl());
 
 // 選択中のテーブル・形式で 'data' ソースを作り直す
 function render() {
+  geojsonRequest?.abort();
   const t = tableSelect.value;
   for (const id of layerIds) if (map.getLayer(id)) map.removeLayer(id);
   if (map.getSource('data')) map.removeSource('data');
@@ -80,19 +82,44 @@ function render() {
   const meta = tables.find((x) => x.name === t);
   if (!meta) return;
   const mvt = fmt() === 'mvt';
-  // MVT: 表示範囲のタイル（/{table}/{z}/{x}/{y}.mvt）だけを都度取得する。大きなデータ向き
-  // GeoJSON: テーブル全体を一度に取得する。小さなデータなら手軽
+  // MVT: 表示範囲のタイル（/{table}/{z}/{x}/{y}.mvt）を MapLibre が自動で取得・キャッシュする
+  // GeoJSON: 最初は空にしておき、loadGeoJson() で表示範囲の分を取得して差し込む
   map.addSource(
     'data',
     mvt
       ? { type: 'vector', tiles: [`${location.origin}/${t}/{z}/{x}/{y}.mvt`] }
-      : { type: 'geojson', data: `${location.origin}/${t}.geojson` },
+      : { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
   );
   // MVT は 1 タイルに複数レイヤを持てるので、どのレイヤを描くか 'source-layer' で指定する。
   // サーバー側の ST_AsMVT でレイヤ名をテーブル名にしているので、ここもテーブル名
   for (const l of LAYERS) map.addLayer(mvt ? { ...l, 'source-layer': t } : l);
   status(`${t}: ${meta.type} / EPSG:${meta.srid} / ${mvt ? 'MVT' : 'GeoJSON'}`);
+  if (!mvt) loadGeoJson();
 }
+
+// GeoJSON は地図を動かし終わる（moveend）たびに、表示範囲の分だけ取り直す。
+// タイルと違ってキャッシュが効かないので、同じ場所に戻っても毎回リクエストが飛ぶ
+let geojsonRequest: AbortController | undefined;
+
+async function loadGeoJson() {
+  if (fmt() !== 'geojson') return;
+  // 前のリクエストがまだ返っていなければ中断する。遅れて届いた古い範囲の結果で上書きしないため
+  geojsonRequest?.abort();
+  geojsonRequest = new AbortController();
+  const t = tableSelect.value;
+  // getBounds() は [[西, 南], [東, 北]] → "西,南,東,北"
+  const bbox = map.getBounds().toArray().flat().join(',');
+  try {
+    const res = await fetch(`/${t}.geojson?bbox=${bbox}`, { signal: geojsonRequest.signal });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    map.getSource<GeoJSONSource>('data')?.setData(data);
+    status(`${t}: GeoJSON / 表示範囲内 ${data.features.length} 件`);
+  } catch (e) {
+    if ((e as Error).name !== 'AbortError') status(`GeoJSON の取得に失敗: ${(e as Error).message}`, true);
+  }
+}
+map.on('moveend', loadGeoJson);
 
 map.on('load', async () => {
   try {

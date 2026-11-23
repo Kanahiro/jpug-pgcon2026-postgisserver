@@ -6,7 +6,7 @@
  *
  *   GET /tables.json                 配信できるテーブルの一覧
  *   GET /{table}.wkt                 WKT（1行1ジオメトリ、元の座標系のまま）
- *   GET /{table}.geojson             GeoJSON（EPSG:4326）
+ *   GET /{table}.geojson?bbox=...    GeoJSON（EPSG:4326）。bbox=西,南,東,北（経緯度）で範囲を絞れる
  *   GET /{table}/{z}/{x}/{y}.mvt     ベクタータイル（MVT）
  *   GET /                            動作確認用ビューア（public/）
  */
@@ -116,8 +116,18 @@ async function toWkt(table: string, info: TableInfo): Promise<string> {
  *        '__geom' をジオメトリとして使い、それ以外のカラムは properties になる。
  *        元のジオメトリカラムを properties に混ぜないよう、サブクエリでは属性カラムだけを選んでいる。
  *   3. json_agg  Feature を配列にまとめ、json_build_object で FeatureCollection に包む
+ *
+ * bbox（地図の表示範囲）を渡すと、その範囲と重なる地物だけを返す。
+ *   - 絞り込みは MVT と同じく「範囲のほうをテーブルの座標系に変換して &&」でインデックスを効かせる
+ *   - ST_Segmentize で辺に 1 度ごとの頂点を足してから変換する。
+ *       4 隅だけ変換すると、広い範囲では投影の歪みで辺が曲がる分を取りこぼす
+ *       （例: 日本の平面直角座標系へ東経100〜180度を変換すると、南端が約 600km 欠ける）
  */
-async function toGeoJson(table: string, info: TableInfo): Promise<string> {
+async function toGeoJson(table: string, info: TableInfo, bbox?: BBox): Promise<string> {
+  const where = bbox
+    ? `WHERE t.${ident(info.geomColumn)} &&
+         ST_Transform(ST_Segmentize(ST_MakeEnvelope($1, $2, $3, $4, 4326), 1), ${Number(info.srid || 4326)})`
+    : '';
   const { rows } = await pool.query(
     `SELECT json_build_object(
        'type', 'FeatureCollection',
@@ -126,9 +136,26 @@ async function toGeoJson(table: string, info: TableInfo): Promise<string> {
      FROM (
        SELECT ${attributeColumns(info)} ST_Transform(${geometryForTransform(info)}, 4326) AS __geom
        FROM ${ident(table)} t
+       ${where}
      ) s`,
+    bbox ?? ([] as number[]),
   );
   return rows[0].body;
+}
+
+type BBox = [west: number, south: number, east: number, north: number];
+
+/**
+ * クエリ文字列の bbox=西,南,東,北 を読む。未指定なら undefined、不正なら null。
+ * 地図は経度 ±180 度を超えて（地球を何周も）表示できるし、Web メルカトルは緯度 ±85.05 度までなので、その範囲に収める。
+ */
+function parseBBox(param: string | null): BBox | null | undefined {
+  if (param === null) return undefined;
+  const n = param.split(',').map(Number);
+  if (n.length !== 4 || !n.every(Number.isFinite)) return null;
+  const lng = (v: number) => Math.min(180, Math.max(-180, v));
+  const lat = (v: number) => Math.min(85.0511, Math.max(-85.0511, v));
+  return [lng(n[0]), lat(n[1]), lng(n[2]), lat(n[3])];
 }
 
 /**
@@ -164,7 +191,8 @@ type Reply = { status: number; contentType: string; body: string | Buffer };
 const ok = (contentType: string, body: string | Buffer): Reply => ({ status: 200, contentType, body });
 const error = (status: number): Reply => ({ status, contentType: 'text/plain', body: http.STATUS_CODES[status] ?? '' });
 
-async function route(path: string): Promise<Reply> {
+async function route(url: URL): Promise<Reply> {
+  const path = url.pathname;
   if (path === '/tables.json') return ok('application/json', JSON.stringify(await listTables()));
 
   // /{table}.wkt, /{table}.geojson
@@ -174,9 +202,10 @@ async function route(path: string): Promise<Reply> {
     const [, table, format] = m;
     const info = await getTableInfo(table);
     if (!info) return error(404);
-    return format === 'wkt'
-      ? ok('text/plain; charset=utf-8', await toWkt(table, info))
-      : ok('application/geo+json', await toGeoJson(table, info));
+    if (format === 'wkt') return ok('text/plain; charset=utf-8', await toWkt(table, info));
+    const bbox = parseBBox(url.searchParams.get('bbox'));
+    if (bbox === null) return error(400);
+    return ok('application/geo+json', await toGeoJson(table, info, bbox));
   }
 
   // /{table}/{z}/{x}/{y}.mvt
@@ -236,7 +265,7 @@ http
 
     res.setHeader('Access-Control-Allow-Origin', '*'); // 別オリジンの地図アプリからも使えるように
     try {
-      const reply = await route(new URL(req.url ?? '/', 'http://localhost').pathname);
+      const reply = await route(new URL(req.url ?? '/', 'http://localhost'));
       res.writeHead(reply.status, {
         'Content-Type': reply.contentType,
         'Content-Length': Buffer.byteLength(reply.body),
