@@ -67,6 +67,9 @@ async function listTables() {
 async function query(r: Route, m: Meta): Promise<Body> {
   const t = q(r.table);
   const g = q(m.geom);
+  // SRID 未指定（0）のカラムは EPSG:4326 とみなす
+  const srid = m.srid || 4326;
+  const geom = m.srid ? `t.${g}` : `ST_SetSRID(t.${g}, 4326)`;
   if (r.kind === 'wkt') {
     const { rows } = await pool.query(`SELECT coalesce(string_agg(ST_AsText(${g}), E'\\n'), '') AS body FROM ${t}`);
     return ['text/plain; charset=utf-8', rows[0].body];
@@ -75,16 +78,16 @@ async function query(r: Route, m: Meta): Promise<Body> {
     const { rows } = await pool.query(
       `SELECT json_build_object('type', 'FeatureCollection', 'features',
          coalesce(json_agg(ST_AsGeoJSON(s.*, '__geom')::json), '[]'))::text AS body
-       FROM (SELECT ${props(m.cols, 't')} ST_Transform(t.${g}, 4326) AS __geom FROM ${t} t) s`,
+       FROM (SELECT ${props(m.cols, 't')} ST_Transform(${geom}, 4326) AS __geom FROM ${t} t) s`,
     );
     return ['application/geo+json', rows[0].body];
   }
   const { rows } = await pool.query(
     `WITH b AS (SELECT ST_TileEnvelope($1, $2, $3) AS e)
      SELECT ST_AsMVT(s.*, $4::text, 4096, '__geom') AS body FROM (
-       SELECT ${props(m.cols, 't')} ST_AsMVTGeom(ST_Transform(t.${g}, 3857), b.e) AS __geom
+       SELECT ${props(m.cols, 't')} ST_AsMVTGeom(ST_Transform(${geom}, 3857), b.e) AS __geom
        FROM ${t} t, b
-       WHERE t.${g} && ST_Transform(b.e, ${Number(m.srid)})
+       WHERE t.${g} && ST_Transform(b.e, ${Number(srid)})
      ) s`,
     [r.z, r.x, r.y, r.table],
   );
