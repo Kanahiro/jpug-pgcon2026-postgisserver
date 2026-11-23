@@ -118,15 +118,12 @@ async function toWkt(table: string, info: TableInfo): Promise<string> {
  *   3. json_agg  Feature を配列にまとめ、json_build_object で FeatureCollection に包む
  *
  * bbox（地図の表示範囲）を渡すと、その範囲と重なる地物だけを返す。
- *   - 絞り込みは MVT と同じく「範囲のほうをテーブルの座標系に変換して &&」でインデックスを効かせる
- *   - ST_Segmentize で辺に 1 度ごとの頂点を足してから変換する。
- *       4 隅だけ変換すると、広い範囲では投影の歪みで辺が曲がる分を取りこぼす
- *       （例: 日本の平面直角座標系へ東経100〜180度を変換すると、南端が約 600km 欠ける）
+ * 絞り込みは MVT と同じく「範囲のほうをテーブルの座標系に変換して &&」でインデックスを効かせる。
  */
 async function toGeoJson(table: string, info: TableInfo, bbox?: BBox): Promise<string> {
   const where = bbox
     ? `WHERE t.${ident(info.geomColumn)} &&
-         ST_Transform(ST_Segmentize(ST_MakeEnvelope($1, $2, $3, $4, 4326), 1), ${Number(info.srid || 4326)})`
+         ST_Transform(ST_MakeEnvelope($1, $2, $3, $4, 4326), ${Number(info.srid || 4326)})`
     : '';
   const { rows } = await pool.query(
     `SELECT json_build_object(
